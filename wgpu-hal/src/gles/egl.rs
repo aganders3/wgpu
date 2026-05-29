@@ -590,18 +590,17 @@ impl Inner {
         let mut context_attributes = vec![];
         let mut gl_context_attributes = vec![];
         let mut gles_context_attributes = vec![];
-        gl_context_attributes.push(khronos_egl::CONTEXT_MAJOR_VERSION);
-        gl_context_attributes.push(3);
-        gl_context_attributes.push(khronos_egl::CONTEXT_MINOR_VERSION);
-        gl_context_attributes.push(3);
-        // Request the desktop GL *core* profile rather than letting the driver
-        // hand back compatibility. NVIDIA on Linux defaults to a compat 3.3
-        // context whose GLSL frontend ("via Cg compiler") has long-standing
-        // miscompile bugs when fragment shaders use multiple texture-access
-        // functions (usampler vs sampler, textureLoad vs textureSampleLevel)
-        // — see
+        // Request GL 4.6 core profile rather than 3.3 compat. NVIDIA returns
+        // a *compatibility* context for 3.3 even when CORE_PROFILE_BIT_KHR is
+        // set (3.3 is the floor of core/compat — they prefer compat there).
+        // Asking for 4.6 forces NVIDIA's modern GLSL frontend, which doesn't
+        // have the Cg-compat-compiler miscompile bugs around mixed
+        // usampler*/sampler* and textureLoad/textureSampleLevel. See:
         // https://forums.developer.nvidia.com/t/fatal-error-c9999-with-spir-v-shader-doing-texelfetch-from-usampler2d-using-newer-glslangvalidator/43617
-        // The core-profile GLSL frontend doesn't have these bugs.
+        gl_context_attributes.push(khronos_egl::CONTEXT_MAJOR_VERSION);
+        gl_context_attributes.push(4);
+        gl_context_attributes.push(khronos_egl::CONTEXT_MINOR_VERSION);
+        gl_context_attributes.push(6);
         if supports_khr_context {
             gl_context_attributes.push(EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR);
             gl_context_attributes.push(EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR);
