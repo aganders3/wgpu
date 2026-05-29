@@ -12,6 +12,9 @@ const CONTEXT_LOCK_TIMEOUT_SECS: u64 = 1;
 const EGL_CONTEXT_FLAGS_KHR: i32 = 0x30FC;
 const EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR: i32 = 0x0001;
 const EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT: i32 = 0x30BF;
+// Desktop-GL profile selection (EGL_KHR_create_context).
+const EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR: i32 = 0x30FD;
+const EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR: i32 = 0x0001;
 const EGL_PLATFORM_WAYLAND_KHR: u32 = 0x31D8;
 const EGL_PLATFORM_X11_KHR: u32 = 0x31D5;
 const EGL_PLATFORM_ANGLE_ANGLE: u32 = 0x3202;
@@ -591,6 +594,18 @@ impl Inner {
         gl_context_attributes.push(3);
         gl_context_attributes.push(khronos_egl::CONTEXT_MINOR_VERSION);
         gl_context_attributes.push(3);
+        // Request the desktop GL *core* profile rather than letting the driver
+        // hand back compatibility. NVIDIA on Linux defaults to a compat 3.3
+        // context whose GLSL frontend ("via Cg compiler") has long-standing
+        // miscompile bugs when fragment shaders use multiple texture-access
+        // functions (usampler vs sampler, textureLoad vs textureSampleLevel)
+        // — see
+        // https://forums.developer.nvidia.com/t/fatal-error-c9999-with-spir-v-shader-doing-texelfetch-from-usampler2d-using-newer-glslangvalidator/43617
+        // The core-profile GLSL frontend doesn't have these bugs.
+        if supports_khr_context {
+            gl_context_attributes.push(EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR);
+            gl_context_attributes.push(EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR);
+        }
         if supports_opengl && force_gles_minor_version != wgt::Gles3MinorVersion::Automatic {
             log::warn!("Ignoring specified GLES minor version as OpenGL is used");
         }
