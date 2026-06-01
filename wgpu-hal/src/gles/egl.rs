@@ -15,6 +15,88 @@ const EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT: i32 = 0x30BF;
 // Desktop-GL profile selection (EGL_KHR_create_context).
 const EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR: i32 = 0x30FD;
 const EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR: i32 = 0x0001;
+const EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT_KHR: i32 = 0x0002;
+
+#[derive(Copy, Clone, Debug)]
+enum GlProfile {
+    Core,
+    Compat,
+}
+
+impl GlProfile {
+    fn mask_bit(self) -> i32 {
+        match self {
+            GlProfile::Core => EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR,
+            GlProfile::Compat => EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT_KHR,
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            GlProfile::Core => "core",
+            GlProfile::Compat => "compat",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct GlVersionRequest {
+    major: u8,
+    minor: u8,
+    profile: GlProfile,
+}
+
+impl GlVersionRequest {
+    fn base_attribs(self, supports_khr_context: bool) -> Vec<i32> {
+        let mut attribs = vec![
+            khronos_egl::CONTEXT_MAJOR_VERSION,
+            self.major as i32,
+            khronos_egl::CONTEXT_MINOR_VERSION,
+            self.minor as i32,
+        ];
+        // Profile mask is part of EGL_KHR_create_context; older displays
+        // don't accept it and we fall back to whatever the driver picks.
+        if supports_khr_context {
+            attribs.push(EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR);
+            attribs.push(self.profile.mask_bit());
+        }
+        attribs
+    }
+}
+
+// Newest-first ladder of desktop-GL versions to try. Each `eglCreateContext`
+// either succeeds at the requested version or fails outright (EGL doesn't
+// silently downgrade), so we try every step. The last entry mirrors wgpu's
+// historical default — 3.3 compatibility profile — so hardware that supports
+// nothing newer ends up exactly where it does today.
+//
+// Newer ⇒ better: it dodges the long-standing NVIDIA Cg-compat-compiler
+// miscompile bugs that bite shaders mixing different texture-access
+// functions (usampler vs sampler, textureLoad vs textureSampleLevel). See
+// https://forums.developer.nvidia.com/t/fatal-error-c9999-with-spir-v-shader-doing-texelfetch-from-usampler2d-using-newer-glslangvalidator/43617
+const GL_TRY_ORDER: &[GlVersionRequest] = &[
+    GlVersionRequest { major: 4, minor: 6, profile: GlProfile::Core },
+    GlVersionRequest { major: 4, minor: 5, profile: GlProfile::Core },
+    GlVersionRequest { major: 4, minor: 4, profile: GlProfile::Core },
+    GlVersionRequest { major: 4, minor: 3, profile: GlProfile::Core },
+    GlVersionRequest { major: 4, minor: 2, profile: GlProfile::Core },
+    GlVersionRequest { major: 4, minor: 1, profile: GlProfile::Core },
+    GlVersionRequest { major: 4, minor: 0, profile: GlProfile::Core },
+    GlVersionRequest { major: 3, minor: 3, profile: GlProfile::Core },
+    GlVersionRequest { major: 3, minor: 3, profile: GlProfile::Compat },
+];
+
+// If `WGPU_GL_VERSION_MAJOR` and `WGPU_GL_VERSION_MINOR` are both set,
+// short-circuit the auto-descend and try only that one version.
+// `WGPU_GL_PROFILE` selects `core` (default) or `compat`.
+fn gl_version_override() -> Option<GlVersionRequest> {
+    let major: u8 = std::env::var("WGPU_GL_VERSION_MAJOR").ok()?.parse().ok()?;
+    let minor: u8 = std::env::var("WGPU_GL_VERSION_MINOR").ok()?.parse().ok()?;
+    let profile = match std::env::var("WGPU_GL_PROFILE").as_deref() {
+        Ok("compat") => GlProfile::Compat,
+        _ => GlProfile::Core,
+    };
+    Some(GlVersionRequest { major, minor, profile })
+}
 const EGL_PLATFORM_WAYLAND_KHR: u32 = 0x31D8;
 const EGL_PLATFORM_X11_KHR: u32 = 0x31D5;
 const EGL_PLATFORM_ANGLE_ANGLE: u32 = 0x3202;
@@ -588,23 +670,23 @@ impl Inner {
         let supports_khr_context = display_extensions.contains("EGL_KHR_create_context");
 
         let mut context_attributes = vec![];
-        let mut gl_context_attributes = vec![];
         let mut gles_context_attributes = vec![];
-        // Request GL 4.6 core profile rather than 3.3 compat. NVIDIA returns
-        // a *compatibility* context for 3.3 even when CORE_PROFILE_BIT_KHR is
-        // set (3.3 is the floor of core/compat — they prefer compat there).
-        // Asking for 4.6 forces NVIDIA's modern GLSL frontend, which doesn't
-        // have the Cg-compat-compiler miscompile bugs around mixed
-        // usampler*/sampler* and textureLoad/textureSampleLevel. See:
-        // https://forums.developer.nvidia.com/t/fatal-error-c9999-with-spir-v-shader-doing-texelfetch-from-usampler2d-using-newer-glslangvalidator/43617
-        gl_context_attributes.push(khronos_egl::CONTEXT_MAJOR_VERSION);
-        gl_context_attributes.push(4);
-        gl_context_attributes.push(khronos_egl::CONTEXT_MINOR_VERSION);
-        gl_context_attributes.push(6);
-        if supports_khr_context {
-            gl_context_attributes.push(EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR);
-            gl_context_attributes.push(EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR);
-        }
+
+        // Desktop-GL versions to attempt, newest-first. Either an explicit
+        // user override or the auto-descend ladder. Each entry is tried in
+        // turn; the first `eglCreateContext` that succeeds wins.
+        let gl_attempts: Vec<GlVersionRequest> = if let Some(forced) = gl_version_override() {
+            log::info!(
+                "WGPU_GL_VERSION_*: forcing GL {}.{} {}",
+                forced.major,
+                forced.minor,
+                forced.profile.as_str(),
+            );
+            vec![forced]
+        } else {
+            GL_TRY_ORDER.to_vec()
+        };
+
         if supports_opengl && force_gles_minor_version != wgt::Gles3MinorVersion::Automatic {
             log::warn!("Ignoring specified GLES minor version as OpenGL is used");
         }
@@ -655,21 +737,54 @@ impl Inner {
         }
         context_attributes.push(khronos_egl::NONE);
 
-        gl_context_attributes.extend(&context_attributes);
         gles_context_attributes.extend(&context_attributes);
 
         let context = if supports_opengl {
-            egl.create_context(display, config, None, &gl_context_attributes)
-                .or_else(|_| {
+            // Try each version in the auto-descend ladder (or just the one
+            // forced by env vars). First success wins. If all fail, fall
+            // back to GLES.
+            let mut gl_context: Option<khronos_egl::Context> = None;
+            let mut last_err = None;
+            for req in &gl_attempts {
+                let mut attribs = req.base_attribs(supports_khr_context);
+                attribs.extend(&context_attributes);
+                match egl.create_context(display, config, None, &attribs) {
+                    Ok(c) => {
+                        log::info!(
+                            "EGL context: GL {}.{} {}",
+                            req.major,
+                            req.minor,
+                            req.profile.as_str(),
+                        );
+                        gl_context = Some(c);
+                        break;
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "EGL: GL {}.{} {} unavailable: {:?}",
+                            req.major,
+                            req.minor,
+                            req.profile.as_str(),
+                            e,
+                        );
+                        last_err = Some(e);
+                    }
+                }
+            }
+            match gl_context {
+                Some(c) => Ok(c),
+                None => {
+                    log::info!("No desktop GL context could be created; falling back to GLES");
                     egl.bind_api(khronos_egl::OPENGL_ES_API).unwrap();
                     egl.create_context(display, config, None, &gles_context_attributes)
-                })
-                .map_err(|e| {
-                    crate::InstanceError::with_source(
-                        String::from("unable to create OpenGL or GLES 3.x context"),
-                        e,
-                    )
-                })
+                        .map_err(|e| {
+                            crate::InstanceError::with_source(
+                                String::from("unable to create OpenGL or GLES 3.x context"),
+                                last_err.unwrap_or(e),
+                            )
+                        })
+                }
+            }
         } else {
             egl.create_context(display, config, None, &gles_context_attributes)
                 .map_err(|e| {
