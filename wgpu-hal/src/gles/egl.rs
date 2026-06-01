@@ -14,7 +14,7 @@ const EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR: i32 = 0x0001;
 const EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT: i32 = 0x30BF;
 // Desktop-GL profile selection (EGL_KHR_create_context).
 const EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR: i32 = 0x30FD;
-const EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR: i32 = 0x0001;
+const EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT_KHR: i32 = 0x0002;
 const EGL_PLATFORM_WAYLAND_KHR: u32 = 0x31D8;
 const EGL_PLATFORM_X11_KHR: u32 = 0x31D5;
 const EGL_PLATFORM_ANGLE_ANGLE: u32 = 0x3202;
@@ -594,15 +594,21 @@ impl Inner {
         gl_context_attributes.push(3);
         gl_context_attributes.push(khronos_egl::CONTEXT_MINOR_VERSION);
         gl_context_attributes.push(3);
-        // Explicitly request the core profile. Leaving the profile mask
-        // unset lets the driver pick — and on NVIDIA Linux that picks the
-        // legacy "Cg compiler" path which has documented miscompile bugs.
-        // The mere presence of the mask attribute kicks NVIDIA into its
-        // modern GLSL frontend (with either core or compat bit set).
-        // Reference: https://forums.developer.nvidia.com/t/fatal-error-c9999-with-spir-v-shader-doing-texelfetch-from-usampler2d-using-newer-glslangvalidator/43617
+        // Explicitly select the compatibility profile. Without an explicit
+        // profile mask, NVIDIA's Linux driver routes 3.3 context creation
+        // through a legacy code path whose GLSL frontend ("3.30 NVIDIA via
+        // Cg compiler") has documented miscompile bugs that silently break
+        // fragment shaders mixing texture-access functions. Requesting the
+        // compat-profile bit explicitly (which is what the driver picks by
+        // default anyway, just implicitly) bypasses that path — and NVIDIA
+        // additionally upgrades the actual reported version to 4.x using
+        // its modern GLSL frontend. Requesting the CORE bit at 3.3 does
+        // NOT bypass this — NVIDIA honors strict 3.3 core via the legacy
+        // path. Reference:
+        // https://forums.developer.nvidia.com/t/fatal-error-c9999-with-spir-v-shader-doing-texelfetch-from-usampler2d-using-newer-glslangvalidator/43617
         if supports_khr_context {
             gl_context_attributes.push(EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR);
-            gl_context_attributes.push(EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR);
+            gl_context_attributes.push(EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT_KHR);
         }
         if supports_opengl && force_gles_minor_version != wgt::Gles3MinorVersion::Automatic {
             log::warn!("Ignoring specified GLES minor version as OpenGL is used");
